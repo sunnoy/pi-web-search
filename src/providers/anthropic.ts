@@ -13,6 +13,13 @@ import {
     sanitizeSearchResults,
     titleFromUrl,
 } from "./results.ts";
+import {
+    buildAnthropicServerTools,
+    describeFetchedDocument,
+    resolveFetchedDocument,
+    type AnthropicServerTools,
+    type FetchedDocument,
+} from "./anthropic_tools.ts";
 import type { NativeSearchCallDetail, SearchResultDetail, StreamResult } from "./types.ts";
 
 const CLAUDE_CODE_SYSTEM_PROMPT = "You are Claude Code, Anthropic's official CLI for Claude.";
@@ -35,10 +42,16 @@ export async function callAnthropicStream(
     model: Model<Api>,
     prompt: string,
     onUpdate?: AgentToolUpdateCallback,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    serverTools: AnthropicServerTools = { search: true, fetch: false }
 ): Promise<StreamResult> {
     const kind = getProviderKind(model) === "deepseek" ? "deepseek" : "anthropic";
     const isDeepSeek = kind === "deepseek";
+    // web_fetch is only wired for Anthropic itself; DeepSeek support is unverified.
+    const enabledTools = { ...serverTools, fetch: serverTools.fetch && !isDeepSeek };
+    if (!enabledTools.search && !enabledTools.fetch) {
+        throw new Error(`${isDeepSeek ? "DeepSeek" : "Anthropic"} request has no server tool enabled`);
+    }
     const providerName = isDeepSeek ? "DeepSeek" : "Anthropic";
     const auth = await getAuth(ctx, model);
     if (!auth.ok) {
@@ -82,13 +95,7 @@ export async function callAnthropicStream(
         // system prompt, reporting it as an opaque 429 rate_limit_error.
         ...(isOAuth ? { system: [{ type: "text", text: CLAUDE_CODE_SYSTEM_PROMPT }] } : {}),
         messages: [{ role: "user", content: prompt }],
-        tools: [{
-            type: "web_search_20260209",
-            name: "web_search",
-            max_uses: 10,
-            // Keep direct search compatible with models without programmatic tool calling.
-            allowed_callers: ["direct"],
-        }],
+        tools: buildAnthropicServerTools(enabledTools),
         stream: true,
     };
 
@@ -108,6 +115,8 @@ export async function callAnthropicStream(
     const nativeSearchEvents: string[] = [];
     const nativeSearchCalls: NativeSearchCallDetail[] = [];
     const searchResults: SearchResultDetail[] = [];
+    const fetchedDocuments: FetchedDocument[] = [];
+    const fetchCallsByIndex = new Map<number, { call: NativeSearchCallDetail; inputJson: string }>();
 
     const collectSource = (source: any, toolUseId?: string) => {
         if (!source?.url) return;
@@ -143,6 +152,47 @@ export async function callAnthropicStream(
                     content: [{ type: "text", text: accumulatedText || `Searching the web with ${providerName}...` }],
                     details: { streaming: true, searching: true }
                 });
+            } else if (block?.type === "server_tool_use" && block.name === "web_fetch") {
+                pushNativeSearchEvent(nativeSearchEvents, `${kind}.content_block_start.server_tool_use.web_fetch`);
+                const call: NativeSearchCallDetail = {
+                    id: block.id,
+                    provider: kind,
+                    status: "in_progress",
+                    actionType: block.name,
+                    urls: typeof block.input?.url === "string" ? [block.input.url] : undefined,
+                    raw: block,
+                };
+                nativeSearchCalls.push(call);
+                fetchCallsByIndex.set(event.index, { call, inputJson: "" });
+                onUpdate?.({
+                    content: [{ type: "text", text: accumulatedText || `Fetching URLs with ${providerName}...` }],
+                    details: { streaming: true, searching: true }
+                });
+            } else if (block?.type === "web_fetch_tool_result") {
+                pushNativeSearchEvent(nativeSearchEvents, `${kind}.content_block_start.web_fetch_tool_result`);
+                const call = nativeSearchCalls.find((item) => item.id === block.tool_use_id);
+                if (call) call.status = "completed";
+                else nativeSearchCalls.push({ id: block.tool_use_id, provider: kind, status: "completed", actionType: "web_fetch", raw: block });
+                const content = block.content;
+                if (content?.type === "web_fetch_result" && content.url) {
+                    const { document, raw } = describeFetchedDocument(content);
+                    fetchedDocuments.push(document);
+                    citations.push({ title: document.title, url: document.url });
+                    pushUniqueSearchResult(searchResults, {
+                        title: document.title,
+                        url: document.url,
+                        source: `${kind}.web_fetch_tool_result`,
+                        type: content.type,
+                        raw: { toolUseId: block.tool_use_id, ...raw },
+                    });
+                } else if (content?.type === "web_fetch_tool_result_error") {
+                    pushUniqueSearchResult(searchResults, {
+                        status: content.error_code,
+                        source: `${kind}.web_fetch_tool_result_error`,
+                        type: content.type,
+                        raw: { toolUseId: block.tool_use_id, urls: call?.urls, ...content },
+                    });
+                }
             } else if (block?.type === "web_search_tool_result") {
                 pushNativeSearchEvent(nativeSearchEvents, `${kind}.content_block_start.web_search_tool_result`);
                 const call = nativeSearchCalls.find((item) => item.id === block.tool_use_id);
@@ -168,8 +218,26 @@ export async function callAnthropicStream(
                     content: [{ type: "text", text: accumulatedText }],
                     details: { streaming: true }
                 });
+            } else if (delta?.type === "input_json_delta") {
+                const pending = fetchCallsByIndex.get(event.index);
+                if (pending) pending.inputJson += delta.partial_json || "";
             } else if (delta?.type === "citations_delta") {
                 const citation = delta.citation;
+                if (citation?.type === "char_location") {
+                    const document = resolveFetchedDocument(citation, fetchedDocuments);
+                    if (document) {
+                        const detail = {
+                            citedText: citation.cited_text,
+                            title: document.title,
+                            url: document.url,
+                            source: `${kind}.citations_delta`,
+                            type: citation.type,
+                            raw: citation,
+                        };
+                        citations.push({ citedText: detail.citedText, title: detail.title, url: detail.url });
+                        pushUniqueSearchResult(searchResults, detail);
+                    }
+                }
                 if (citation?.type === "web_search_result_location" && citation.url) {
                     const detail = {
                         citedText: citation.cited_text,
@@ -181,6 +249,17 @@ export async function callAnthropicStream(
                     };
                     citations.push({ citedText: detail.citedText, title: detail.title, url: detail.url });
                     pushUniqueSearchResult(searchResults, detail);
+                }
+            }
+        } else if (event.type === "content_block_stop") {
+            const pending = fetchCallsByIndex.get(event.index);
+            if (pending) {
+                fetchCallsByIndex.delete(event.index);
+                try {
+                    const input = JSON.parse(pending.inputJson || "{}");
+                    if (typeof input.url === "string") pending.call.urls = [input.url];
+                } catch {
+                    // Malformed streamed input: leave the call without a URL.
                 }
             }
         } else if (event.type === "error") {

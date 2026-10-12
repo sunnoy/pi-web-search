@@ -59,7 +59,9 @@ export async function webSearch(
         const result = await callApiStream(ctx, model, {
             contents: [{ role: "user", parts: [{ text: prompt }] }],
             ...(tools ? { tools } : {})
-        }, onUpdate, signal, thinkingLevel, params.urls);
+        }, onUpdate, signal, thinkingLevel, params.urls,
+            // Anthropic only fetches URLs through its web_fetch server tool.
+            config.kind === "anthropic" && hasUrls ? { search: true, fetch: true } : undefined);
 
         return formatWebSearchResult(result, { modelId: model.id });
     } catch (e: any) {

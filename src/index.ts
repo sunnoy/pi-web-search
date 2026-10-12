@@ -13,7 +13,8 @@ function supportsUrlContext(model: Model<Api> | undefined) {
     const kind = getProviderKind(model);
     // Ollama serves URL retrieval through its web_fetch endpoint instead of
     // Gemini URL Context; the tool dispatch handles both.
-    return kind === "google" || kind === "ollama";
+    // Anthropic (not DeepSeek) serves it through the web_fetch server tool.
+    return kind === "google" || kind === "ollama" || kind === "anthropic";
 }
 
 function setEquals<T>(a: Set<T>, b: Set<T>) {
@@ -67,7 +68,7 @@ export default function (pi: ExtensionAPI) {
     pi.registerTool({
         name: WEB_SEARCH_TOOL,
         label: "Web Search",
-        description: "Search the web using the current supported provider (Google Gemini, xAI Grok, OpenAI, Anthropic, DeepSeek, Ollama, or OpenCode Zen/Go). Optionally include URLs to analyze alongside search results.",
+        description: "Search the web using the current supported provider (Google Gemini, xAI Grok, OpenAI, Anthropic, DeepSeek, Ollama, or OpenCode Zen/Go). Optionally include URLs to analyze alongside search results (Anthropic fetches them with its native web_fetch tool).",
         parameters: WebSearchSchema,
         execute: (id, params, signal = new AbortController().signal, onUpdate, ctx): Promise<AgentToolResult<any>> =>
             webSearch(id, params, signal, onUpdate, ctx, pi.getThinkingLevel()),
@@ -97,7 +98,7 @@ export default function (pi: ExtensionAPI) {
     pi.registerTool({
         name: URL_CONTEXT_TOOL,
         label: "URL Context",
-        description: "Analyze the content of up to 20 public URLs using provider-native URL retrieval (Gemini URL Context or Ollama web fetch). Supports web pages and documents; images and YouTube videos need Gemini.",
+        description: "Analyze the content of up to 20 public URLs using provider-native URL retrieval (Gemini URL Context, Anthropic web fetch, or Ollama web fetch). Supports web pages and documents; images and YouTube videos need Gemini. Anthropic can only fetch URLs given explicitly here.",
         parameters: UrlContextSchema,
         execute: urlContext
     });

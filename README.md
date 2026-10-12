@@ -33,7 +33,9 @@ Supports passing up to 20 additional URLs to analyze alongside the query. Succes
 
 ### `url_context`
 
-Gemini and Ollama Cloud. Analyze up to 20 public URLs — web pages, documents, images, and YouTube videos. Gemini uses native URL Context retrieval with verified metadata; Ollama uses its `web_fetch` endpoint (web pages and documents only).
+Gemini, Anthropic, and Ollama Cloud. Analyze up to 20 public URLs — web pages, documents, images, and YouTube videos. Gemini uses native URL Context retrieval with verified metadata; Ollama uses its `web_fetch` endpoint (web pages and documents only).
+
+Anthropic models use the native `web_fetch_20260318` server tool (web pages and PDFs; images and YouTube need Gemini). Fetched documents are listed as sources and `char_location` citations are mapped back to the fetched URL (by document title, then fetch order); document bodies are never included in tool details. Claude can only fetch URLs you pass explicitly or that appeared in earlier search/fetch results. When `web_search` is given `urls` on an Anthropic model, `web_fetch` is enabled alongside web search. DeepSeek is not wired for `web_fetch`. Limitation: `pause_turn` continuation is not implemented, so a long server-tool turn may return partial text.
 
 When using `google-generative-ai`, YouTube URLs are passed as `file_data` for native video understanding.
 
@@ -62,7 +64,7 @@ For OpenAI Responses models (including Azure, Codex, and Copilot), `web_search` 
 
 When thinking is off or unavailable, or the search model is non-reasoning, the request omits `reasoning` and leaves the choice to the provider. Off does not force reasoning off: some models reject `reasoning.effort: "none"`. Google, Anthropic, xAI, and Ollama behavior is unchanged.
 
-`url_context` is automatically removed from active tools when using a model that supports neither Gemini URL Context nor Ollama web fetch.
+`url_context` is automatically removed from active tools when using a model that supports none of Gemini URL Context, Anthropic web fetch, or Ollama web fetch (including DeepSeek).
 
 ### DeepSeek
 

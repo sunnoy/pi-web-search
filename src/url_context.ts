@@ -1,6 +1,7 @@
 import type { ExtensionContext, AgentToolUpdateCallback } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
 import { callApiStream, getConfig } from "./api.ts";
+import { callAnthropicStream } from "./providers/anthropic.ts";
 import { callOllamaUrlContext } from "./providers/ollama.ts";
 import { formatResult, formatUrlContextResult } from "./format.ts";
 import { getModel, missingConfigResult, errorResult } from "./utils.ts";
@@ -36,14 +37,19 @@ export async function urlContext(
             const result = await callOllamaUrlContext(ctx, model, params.query, params.urls, signal);
             return formatUrlContextResult(result, { modelId: model.id });
         }
+        if (config.kind === "anthropic") {
+            const prompt = `${params.query}\n\nURLs:\n${params.urls.join("\n")}`;
+            const result = await callAnthropicStream(ctx, model, prompt, onUpdate, signal, { search: false, fetch: true });
+            return formatUrlContextResult(result, { modelId: model.id });
+        }
         if (config.kind !== "google") {
             return formatResult(
-                `url_context currently requires a Google Gemini-compatible model. Current model: ${model.id} (${model.provider}/${model.api}).\n\nUse web_search for cross-provider web search, or switch to Gemini for provider-native URL context retrieval.`,
+                `url_context currently requires a Google Gemini, Anthropic, or Ollama Cloud model. Current model: ${model.id} (${model.provider}/${model.api}).\n\nUse web_search for cross-provider web search, or switch to Gemini, Anthropic, or Ollama Cloud for provider-native URL retrieval.`,
                 {
                     error: "unsupported_provider",
                     providerKind: config.kind,
                     model: model.id,
-                    supportedProviders: ["google", "google-generative-ai"],
+                    supportedProviders: ["google", "google-generative-ai", "anthropic", "ollama"],
                     grounded: false,
                 }
             );
